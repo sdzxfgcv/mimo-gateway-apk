@@ -33,6 +33,12 @@ class MainActivity : Activity() {
         setContentView(R.layout.activity_main)
         cfg = Config(this)
 
+        // 捕获主线程未处理异常，写文件而不是静默闪退
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            CrashLog.write(this, "MainActivity.uncaught", e)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+
         val etCurl = findViewById<EditText>(R.id.etCurl)
         val etSt = findViewById<EditText>(R.id.etServiceToken)
         val etUid = findViewById<EditText>(R.id.etUserId)
@@ -85,7 +91,18 @@ class MainActivity : Activity() {
                     return@setOnClickListener
                 }
                 requestNotifPermission()
+                CrashLog.clear(this)
                 startGateway()
+                // 延迟检查是否启动成功，失败则显示崩溃日志
+                findViewById<Button>(R.id.btnToggle).postDelayed({
+                    if (!GatewayService.isRunning) {
+                        val err = CrashLog.read(this@MainActivity)
+                        if (err.isNotBlank()) {
+                            findViewById<TextView>(R.id.tvStatus).text = "状态：启动失败"
+                            findViewById<TextView>(R.id.tvHint).text = "错误日志：\n$err"
+                        }
+                    }
+                }, 1500)
             }
         }
 
