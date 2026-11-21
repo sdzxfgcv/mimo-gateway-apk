@@ -28,18 +28,25 @@ class GatewayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        cfg = Config(this)
-        createChannel()
-        startForeground(1, buildNotification())
+        try {
+            cfg = Config(this)
+            createChannel()
+            startForeground(1, buildNotification())
+        } catch (e: Exception) {
+            CrashLog.write(this, "GatewayService.onCreate", e)
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (server?.running == true) return START_STICKY
         try {
+            if (!::cfg.isInitialized) cfg = Config(this)
             server = TinyHttpServer(cfg.port, ApiHandler(cfg)).also { it.start() }
             isRunning = true
             Log.i("MiMoGateway", "Server started on port ${cfg.port}")
         } catch (e: Exception) {
+            CrashLog.write(this, "GatewayService.onStartCommand", e)
             Log.e("MiMoGateway", "Failed to start server", e)
             stopSelf()
         }
@@ -71,7 +78,7 @@ class GatewayService : Service() {
         } else {
             Notification.Builder(this)
         }.apply {
-            setSmallIcon(android.R.drawable.stat_sys_upload)
+            setSmallIcon(R.drawable.ic_notify)
             setContentTitle("MiMo Gateway")
             setContentText("本地 API 网关运行中 · 端口 ${cfg.port}")
             setContentIntent(pi)
