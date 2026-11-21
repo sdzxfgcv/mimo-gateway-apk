@@ -35,11 +35,7 @@ class Config(ctx: Context) {
         set(v) = sp.edit().putString("model", v).apply()
 
     var thinkMode: String
-        get() {
-            val v = sp.getString("thinkMode", "strip") ?: "strip"
-            // 老版本默认 separate 会把 <think> 泄漏到正文，统一改为 strip
-            return if (v == "separate") "strip" else v
-        }
+        get() = sp.getString("thinkMode", "separate") ?: "separate"
         set(v) = sp.edit().putString("thinkMode", v).apply()
 
     fun isConfigured(): Boolean = serviceToken.isNotBlank() && userId.isNotBlank() && phToken.isNotBlank()
