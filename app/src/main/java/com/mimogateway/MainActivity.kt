@@ -48,6 +48,10 @@ class MainActivity : Activity() {
         etKey.setText(cfg.apiKey)
         etPort.setText(if (cfg.port != 8080) cfg.port.toString() else "")
 
+        findViewById<Button>(R.id.btnLogin).setOnClickListener {
+            startActivityForResult(Intent(this, LoginActivity::class.java), 2001)
+        }
+
         findViewById<Button>(R.id.btnImport).setOnClickListener {
             val ok = cfg.importFromCurl(etCurl.text.toString().trim())
             Toast.makeText(this, if (ok) "导入成功" else "解析失败，请检查 cURL 内容", Toast.LENGTH_SHORT).show()
@@ -130,6 +134,18 @@ class MainActivity : Activity() {
     override fun onStop() {
         super.onStop()
         if (bound) { unbindService(conn); bound = false }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 2001 && resultCode == RESULT_OK) {
+            // 登录后刷新输入框
+            findViewById<EditText>(R.id.etServiceToken).setText(cfg.serviceToken)
+            findViewById<EditText>(R.id.etUserId).setText(cfg.userId)
+            findViewById<EditText>(R.id.etPhToken).setText(cfg.phToken)
+            Toast.makeText(this, "凭证已就绪，点「启动服务」即可", Toast.LENGTH_SHORT).show()
+            refreshStatus()
+        }
     }
 
     override fun onResume() { super.onResume(); refreshStatus() }
