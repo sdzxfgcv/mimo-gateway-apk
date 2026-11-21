@@ -7,7 +7,8 @@ import org.json.JSONObject
  * 极简配置存储。凭据用 SharedPreferences 保存（私有目录，其他 App 读不到）。
  */
 class Config(ctx: Context) {
-    private val sp = ctx.applicationContext.getSharedPreferences("mimo_gateway", Context.MODE_PRIVATE)
+    val appContext: Context = ctx.applicationContext
+    private val sp = appContext.getSharedPreferences("mimo_gateway", Context.MODE_PRIVATE)
 
     var serviceToken: String
         get() = sp.getString("serviceToken", "") ?: ""
