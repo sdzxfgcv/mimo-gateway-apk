@@ -102,7 +102,9 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         var text = fullText.toString()
         val tools = req.optJSONArray("tools")
         val calls = if (tools != null && tools.length() > 0) Protocol.parseToolCalls(text) else emptyList()
-        if (calls.isNotEmpty()) text = Protocol.stripThink(text)
+        // 有工具调用时，正文里的 MiMoML 块不算内容；始终清掉残留的 think/工具标记
+        text = Protocol.stripThink(text)
+        if (calls.isNotEmpty()) text = Protocol.cleanToolText(text)
         // 上游未返回任何正文时，把诊断日志回显给客户端，避免"空内容"难以排查
         if (text.isBlank() && calls.isEmpty()) {
             val diag = CrashLog.read(cfg.appContext)
@@ -200,9 +202,10 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
                         if (t.isNotEmpty()) {
                             if (wantTools) {
                                 buf.append(t)
-                                // 流式输出：若还没出现工具标记，先输出安全部分（保留尾部 12 字符防跨块标记）
-                                if (!buf.contains("<tool_call")) {
-                                    val safe = buf.length - 12
+                                // 流式输出：若还没出现工具标记，先输出安全部分
+                                // 保留尾部 20 字符防跨块标记（MiMoML 标记较长）
+                                if (!Protocol.hasToolMarker(buf.toString())) {
+                                    val safe = buf.length - 20
                                     if (safe > 0) {
                                         val emit = buf.substring(0, safe)
                                         buf.delete(0, safe)
@@ -232,7 +235,9 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
             val calls = Protocol.parseToolCalls(buf.toString())
             if (calls.isNotEmpty()) {
                 finishReason = "tool_calls"
-                if (buf.isNotBlank()) sendDelta(out, responseId, created, model, JSONObject().put("content", buf.toString()))
+                // 只发清理掉 MiMoML 块后的残留正文（一般为空），不要把工具标记当内容
+                val leftover = Protocol.cleanToolText(buf.toString())
+                if (leftover.isNotBlank()) sendDelta(out, responseId, created, model, JSONObject().put("content", leftover))
                 val tcArr = JSONArray()
                 for ((idx, c) in calls.withIndex()) {
                     tcArr.put(JSONObject().apply {
@@ -249,7 +254,8 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
                     sendDelta(out, responseId, created, model, JSONObject().put("tool_calls", argsArr))
                 }
             } else if (buf.isNotBlank()) {
-                sendDelta(out, responseId, created, model, JSONObject().put("content", buf.toString()))
+                val leftover = Protocol.stripThink(Protocol.cleanToolText(buf.toString()))
+                if (leftover.isNotBlank()) sendDelta(out, responseId, created, model, JSONObject().put("content", leftover))
             }
         }
 
