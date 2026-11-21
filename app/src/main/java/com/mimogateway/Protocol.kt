@@ -10,51 +10,97 @@ import java.util.UUID
  */
 object Protocol {
 
-    /** 把 OpenAI messages 序列化成发往 MiMo 的 query 文本。 */
-    fun serializeMessages(messages: JSONArray): String {
-        val system = mutableListOf<String>()
+    /**
+     * 把 OpenAI messages 序列化成发往 MiMo 的 query 文本。
+     * 格式参考 Fly143/MiMo2API build_query_from_messages（2026-11 实测可用）：
+     * - system 消息 + 工具提示词作为首行 "system: ..."
+     * - assistant 的 tool_calls 用 antml:invoke 方言
+     * - tool 结果用 <function_results> 块（模型才认，否则循环重调工具）
+     * - continuation=true 时只发最后一条 user；尾部是 tool 结果则只发工具结果
+     */
+    fun serializeMessages(messages: JSONArray, toolPrompt: String = "", continuation: Boolean = false): String {
+        var systemText = ""
         val rest = mutableListOf<JSONObject>()
         for (i in 0 until messages.length()) {
             val m = messages.optJSONObject(i) ?: continue
-            when (m.optString("role")) {
-                "system" -> system.add(m.optString("content", ""))
-                else -> rest.add(m)
+            if (m.optString("role") == "system") {
+                systemText = contentToString(m.opt("content")).trim()
+            } else {
+                rest.add(m)
             }
         }
-        // 只保留最近 20 条非系统消息
-        val trimmed = if (rest.size > 20) rest.takeLast(20) else rest
+
+        var toSend = rest.toList()
+        if (continuation && toSend.isNotEmpty()) {
+            // 尾部带工具结果时只发工具结果（避免"重复提问"导致工具循环）
+            val tailTools = toSend.filter { it.optString("role") == "tool" }
+            if (tailTools.isNotEmpty()) {
+                toSend = tailTools
+            } else {
+                val lastUser = toSend.lastOrNull { it.optString("role") == "user" }
+                toSend = if (lastUser != null) listOf(lastUser) else toSend.takeLast(1)
+            }
+        } else if (!continuation && toSend.size > 20) {
+            toSend = toSend.takeLast(20)
+        }
+
+        if (toolPrompt.isNotBlank()) {
+            systemText = if (systemText.isNotBlank()) "$systemText\n\n$toolPrompt" else toolPrompt
+        }
+
         val parts = mutableListOf<String>()
-        if (system.isNotEmpty()) {
-            parts.add("[System Instruction]\n${system.joinToString("\n")}")
+        toSend.forEach { parts.add(formatMessage(it)) }
+        if (systemText.isNotBlank()) parts.add(0, "system: $systemText")
+        return parts.joinToString("\n")
+    }
+
+    private fun contentToString(content: Any?): String = when (content) {
+        is String -> content
+        is org.json.JSONArray -> {
+            val sb = StringBuilder()
+            for (i in 0 until content.length()) {
+                val item = content.optJSONObject(i) ?: continue
+                if (item.optString("type") == "text") sb.append(item.optString("text")).append(" ")
+            }
+            sb.toString().trim()
         }
-        if (trimmed.size > 1) {
-            val history = trimmed.dropLast(1).joinToString("\n") { formatMessage(it) }
-            parts.add("[Conversation History]\n$history")
-        }
-        if (trimmed.isNotEmpty()) {
-            parts.add("[Current Query]\n${formatMessage(trimmed.last())}")
-        }
-        return parts.joinToString("\n\n")
+        else -> ""
     }
 
     private fun formatMessage(m: JSONObject): String {
         val role = m.optString("role")
         if (role == "assistant" && m.has("tool_calls")) {
-            val calls = m.getJSONArray("tool_calls")
-            val sb = StringBuilder("assistant: [Tool Calls]\n")
+            val calls = m.optJSONArray("tool_calls") ?: JSONArray()
+            val sb = StringBuilder()
             for (i in 0 until calls.length()) {
                 val fn = calls.getJSONObject(i).optJSONObject("function") ?: continue
-                sb.append("${fn.optString("name")}(${fn.optString("arguments")})\n")
+                val name = fn.optString("name")
+                val argsStr = fn.optString("arguments", "{}")
+                val params = StringBuilder()
+                try {
+                    val args = JSONObject(argsStr)
+                    for (key in args.keys()) {
+                        var v = args.get(key)
+                        if (v !is String && v !is Number && v !is Boolean) v = v.toString()
+                        val vs = v.toString().replace("]]>", "]]&gt;")
+                        params.append("  <antml:parameter name=\"$key\"><![CDATA[$vs]]></antml:parameter>\n")
+                    }
+                } catch (_: Exception) {}
+                sb.append("<antml:invoke name=\"$name\">\n${params}</antml:invoke>")
             }
-            val c = m.optString("content", "")
-            if (c.isNotBlank()) sb.append(c)
-            return sb.toString().trimEnd()
+            val c = contentToString(m.opt("content"))
+            return "assistant: ${sb.toString().trim()}${if (c.isNotBlank()) "\n$c" else ""}"
         }
         if (role == "tool") {
-            val name = m.optString("name", "unknown")
-            return "[Tool Result] $name:\n${m.optString("content", "")}"
+            val toolCallId = m.optString("tool_call_id", "")
+            val name = m.optString("name", "")
+            var clean = contentToString(m.opt("content")).replace(Regex("\\[TOOL_RESULT\\]\\s*", RegexOption.IGNORE_CASE), "").trim()
+            clean = clean.replace("]]>", "]]&gt;")
+            val idAttr = if (toolCallId.isNotBlank()) " id=\"$toolCallId\"" else ""
+            val nameAttr = if (name.isNotBlank()) " name=\"$name\"" else ""
+            return "<function_results>\n<result$idAttr$nameAttr><![CDATA[$clean]]></result>\n</function_results>"
         }
-        return "$role: ${m.optString("content", "")}"
+        return "$role: ${contentToString(m.opt("content"))}"
     }
 
     /**
