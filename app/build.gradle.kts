@@ -15,6 +15,14 @@ android {
         versionName = "1.0.0"
     }
 
+    // 用内置 debug keystore 签名，保证 release 包可直接安装
+    signingConfigs {
+        getByName("debug") {
+            isV1SigningEnabled = true
+            isV2SigningEnabled = true
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
