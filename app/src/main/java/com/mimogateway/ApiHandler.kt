@@ -102,6 +102,11 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         val tools = req.optJSONArray("tools")
         val calls = if (tools != null && tools.length() > 0) Protocol.parseToolCalls(text) else emptyList()
         if (calls.isNotEmpty()) text = Protocol.stripThink(text)
+        // 上游未返回任何正文时，把诊断日志回显给客户端，避免"空内容"难以排查
+        if (text.isBlank() && calls.isEmpty()) {
+            val diag = CrashLog.read(cfg.appContext)
+            text = "[MiMo Gateway] 上游未返回正文。诊断：\n${diag.takeLast(600)}"
+        }
 
         val responseId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
         val created = System.currentTimeMillis() / 1000
