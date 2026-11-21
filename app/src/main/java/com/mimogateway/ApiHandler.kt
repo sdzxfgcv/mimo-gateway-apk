@@ -93,6 +93,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         mimo.chat(convId, query, model, thinking) { chunk ->
             when (chunk) {
                 is MimoChunk.Text -> fullText.append(chunk.content)
+                is MimoChunk.Reasoning -> {} // 非流式：思考已包含在 <think> 中或按 thinkMode 处理
                 is MimoChunk.Usage -> usage = chunk
                 is MimoChunk.DialogId -> {} // 保持原 conversationId 即可
                 is MimoChunk.Finish -> {}
@@ -158,12 +159,27 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         var inThink = false
         var usage: MimoChunk.Usage? = null
         var finishReason = "stop"
+        var thinkOpened = false
 
         try {
             mimo.chat(convId, query, model, thinking) { chunk ->
                 when (chunk) {
+                    is MimoChunk.Reasoning -> {
+                        if (cfg.thinkMode == "strip") return@chat
+                        val r = chunk.content
+                        if (r.isNotEmpty()) {
+                            val piece = (if (!thinkOpened) { thinkOpened = true; "<think>" } else "") + r
+                            if (wantTools) buf.append(piece)
+                            else sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", piece))
+                        }
+                    }
                     is MimoChunk.Text -> {
                         var t = chunk.content
+                        // 闭合之前打开的 think 段（separate 模式用 reasoning_content 字段已单独发，这里补尾巴）
+                        if (thinkOpened && cfg.thinkMode != "strip") {
+                            thinkOpened = false
+                            if (!wantTools) sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", "</think>"))
+                        }
                         if (cfg.thinkMode == "strip") {
                             // 逐块剔除 <think>...</think>
                             val sb = StringBuilder()
