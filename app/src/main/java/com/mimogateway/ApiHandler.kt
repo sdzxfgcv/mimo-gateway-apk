@@ -67,7 +67,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     /** 构造 query；思考默认开启，直到客户端明确要求关闭。 */
     private fun buildQuery(req: JSONObject): Pair<String, Boolean> {
         val messages = req.optJSONArray("messages") ?: JSONArray()
-        val query = Protocol.serializeMessages(messages, "", false) // 不注入工具提示词
+        val query = Protocol.serializeMessages(messages) // 纯对话，不注入工具提示词
         val effort = req.optString("reasoning_effort", "").ifBlank {
             req.optJSONObject("reasoning")?.optString("effort", "") ?: ""
         }
