@@ -4,18 +4,19 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.OutputStream
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /**
- * OpenAI 兼容路由处理器。
+ * 纯对话 OpenAI 兼容路由（不做工具调用）。
  * - GET  /health
  * - GET  /v1/models
  * - POST /v1/chat/completions  (stream / non-stream)
+ *
+ * 设计：完全忽略客户端传来的 tools/tool_choice，只做文本对话。
+ * 每次响应都保证 choices[0].message.content 有正文（思考走 reasoning_content 字段），
+ * 避免客户端报"模型未返回正文或工具调用"。
  */
 class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     private val mimo = MimoClient(cfg)
-    // 客户端会话 id → MiMo conversationId（简单会话保持；进程内有效）
-    private val sessions = ConcurrentHashMap<String, String>()
     private var cachedModels: List<String>? = null
 
     override fun handle(method: String, path: String, headers: Map<String, String>, body: String, out: OutputStream): Boolean {
@@ -38,7 +39,6 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
                 return true
             }
             if (method == "POST" && path == "/v1/chat/completions") {
-                // 鉴权
                 val expected = cfg.apiKey
                 if (expected.isNotBlank()) {
                     val auth = headers["authorization"] ?: ""
@@ -64,39 +64,10 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         }
     }
 
-    private fun clientSessionKey(req: JSONObject): String {
-        val explicit = req.optString("user", "")
-        if (explicit.isNotBlank()) return explicit
-        // 无 user 字段时，用最早一条 user 消息作为会话锚点（同一对话首条消息不变）
-        val msgs = req.optJSONArray("messages") ?: JSONArray()
-        for (i in 0 until msgs.length()) {
-            val m = msgs.optJSONObject(i) ?: continue
-            if (m.optString("role") == "user") {
-                return "u:" + contentStr(m.opt("content")).take(120)
-            }
-        }
-        return "fallback"
-    }
-
-    private fun contentStr(c: Any?): String = when (c) {
-        is String -> c
-        is JSONArray -> {
-            val sb = StringBuilder()
-            for (i in 0 until c.length()) {
-                val o = c.optJSONObject(i) ?: continue
-                if (o.optString("type") == "text") sb.append(o.optString("text"))
-            }
-            sb.toString()
-        }
-        else -> ""
-    }
-
-    private fun buildQuery(req: JSONObject, continuation: Boolean): Pair<String, Boolean> {
+    /** 构造 query；思考默认开启，直到客户端明确要求关闭。 */
+    private fun buildQuery(req: JSONObject): Pair<String, Boolean> {
         val messages = req.optJSONArray("messages") ?: JSONArray()
-        val tools = req.optJSONArray("tools")
-        val toolPrompt = if (tools != null && tools.length() > 0) Protocol.buildToolSystemPrompt(tools) else ""
-        val query = Protocol.serializeMessages(messages, toolPrompt, continuation)
-        // 默认开启思考（用户要看思考）；仅当客户端明确要求 none/off 时关闭
+        val query = Protocol.serializeMessages(messages, "", false) // 不注入工具提示词
         val effort = req.optString("reasoning_effort", "").ifBlank {
             req.optJSONObject("reasoning")?.optString("effort", "") ?: ""
         }
@@ -104,190 +75,120 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         return Pair(query, enableThinking)
     }
 
-    private fun getConversationId(req: JSONObject): Pair<String, Boolean> {
-        val key = clientSessionKey(req)
-        val existing = sessions[key]
-        if (existing != null) return Pair(existing, false) // 续接
-        val conv = UUID.randomUUID().toString().replace("-", "")
-        sessions[key] = conv
-        return Pair(conv, true) // 新会话
+    private fun convId(req: JSONObject): String {
+        val key = req.optString("user", "").ifBlank {
+            val msgs = req.optJSONArray("messages") ?: JSONArray()
+            for (i in 0 until msgs.length()) {
+                val m = msgs.optJSONObject(i) ?: continue
+                if (m.optString("role") == "user") {
+                    return "u:" + m.optString("content", "").take(120)
+                }
+            }
+            "fallback"
+        }
+        return UUID.nameUUIDFromBytes(key.toByteArray()).toString().replace("-", "")
     }
 
     private fun handleNonStream(req: JSONObject, out: OutputStream) {
-        val (convId, isNew) = getConversationId(req)
-        val (query, thinking) = buildQuery(req, continuation = !isNew)
+        val cid = convId(req)
+        val (query, thinking) = buildQuery(req)
         val model = mimo.resolveModel(req.optString("model", cfg.model))
-        val fullText = StringBuilder()
+        val text = StringBuilder()
+        val reason = StringBuilder()
         var usage: MimoChunk.Usage? = null
-        mimo.chat(convId, query, model, thinking) { chunk ->
+        mimo.chat(cid, query, model, thinking) { chunk ->
             when (chunk) {
-                is MimoChunk.Text -> fullText.append(chunk.content)
-                is MimoChunk.Reasoning -> {} // 非流式：思考已包含在 <think> 中或按 thinkMode 处理
+                is MimoChunk.Text -> text.append(chunk.content)
+                is MimoChunk.Reasoning -> reason.append(chunk.content)
                 is MimoChunk.Usage -> usage = chunk
-                is MimoChunk.DialogId -> {} // 保持原 conversationId 即可
-                is MimoChunk.Finish -> {}
+                is MimoChunk.DialogId, is MimoChunk.Finish -> {}
             }
         }
-        var text = fullText.toString()
-        val tools = req.optJSONArray("tools")
-        val calls = if (tools != null && tools.length() > 0) Protocol.parseToolCalls(text) else emptyList()
-        // 有工具调用时，正文里的 MiMoML 块不算内容；始终清掉残留的 think/工具标记
-        text = Protocol.stripThink(text)
-        if (calls.isNotEmpty()) text = Protocol.cleanToolText(text)
-        // 上游未返回任何正文时，把诊断日志回显给客户端，避免"空内容"难以排查
-        if (text.isBlank() && calls.isEmpty()) {
-            val diag = CrashLog.read(cfg.appContext)
-            text = "[MiMo Gateway] 上游未返回正文。诊断：\n${diag.takeLast(600)}"
+        var body = Protocol.stripThink(text.toString()).trim()
+        if (body.isBlank()) {
+            val diag = CrashLog.read(cfg.appContext).takeLast(400)
+            body = if (diag.isNotBlank()) "[MiMo Gateway] 上游未返回正文。诊断：$diag"
+                   else "[MiMo Gateway] 上游未返回正文，请稍后重试或检查登录凭证。"
         }
-
         val responseId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
         val created = System.currentTimeMillis() / 1000
         val message = JSONObject().apply {
             put("role", "assistant")
-            if (calls.isNotEmpty()) {
-                put("content", null)
-                val tcArr = JSONArray()
-                for (c in calls) {
-                    tcArr.put(JSONObject().apply {
-                        put("id", c.id); put("type", "function")
-                        put("function", JSONObject().apply { put("name", c.name); put("arguments", c.arguments) })
-                    })
-                }
-                put("tool_calls", tcArr)
-            } else {
-                put("content", if (cfg.thinkMode == "strip") Protocol.stripThink(text) else text)
+            put("content", body)
+            if (cfg.thinkMode == "separate" && reason.isNotBlank()) {
+                put("reasoning_content", reason.toString())
             }
-        }
-        val choice = JSONObject().apply {
-            put("index", 0); put("message", message)
-            put("finish_reason", if (calls.isNotEmpty()) "tool_calls" else "stop")
         }
         val resp = JSONObject().apply {
             put("id", responseId); put("object", "chat.completion")
             put("created", created); put("model", model)
-            put("choices", JSONArray().put(choice))
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0); put("message", message); put("finish_reason", "stop")
+            }))
             if (usage != null) put("usage", JSONObject().apply {
                 put("prompt_tokens", usage!!.prompt); put("completion_tokens", usage!!.completion)
                 put("total_tokens", usage!!.total)
-                put("completion_tokens_details", JSONObject().put("reasoning_tokens", usage!!.reasoning))
             })
         }
         TinyHttpServer.writeJson(out, 200, resp)
     }
 
     private fun handleStream(req: JSONObject, out: OutputStream) {
-        val (convId, isNew) = getConversationId(req)
-        val (query, thinking) = buildQuery(req, continuation = !isNew)
+        val cid = convId(req)
+        val (query, thinking) = buildQuery(req)
         val model = mimo.resolveModel(req.optString("model", cfg.model))
-        val tools = req.optJSONArray("tools")
-        val wantTools = tools != null && tools.length() > 0
 
         TinyHttpServer.writeSseHeaders(out)
         val responseId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
         val created = System.currentTimeMillis() / 1000
-        val buf = StringBuilder()
-        var thinkingBuf = StringBuilder()
-        var inThink = false
         var usage: MimoChunk.Usage? = null
-        var finishReason = "stop"
+        var inThink = false
+        var thinkBuf = StringBuilder()
+        var gotContent = false
 
         try {
-            mimo.chat(convId, query, model, thinking) { chunk ->
+            mimo.chat(cid, query, model, thinking) { chunk ->
                 when (chunk) {
                     is MimoChunk.Reasoning -> {
                         if (cfg.thinkMode == "strip") return@chat
                         val r = chunk.content
+                        // 纯文本思考，Eta 读 reasoning_content 字段直接渲染成思考块，不带 <think> 标签
                         if (r.isNotEmpty()) {
-                            // separate 模式：思考走 reasoning_content 纯文本字段，Eta 等客户端据此显示思考，不加 <think> 标签
-                            if (wantTools) buf.append(r)
-                            else sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", r))
+                            inThink = true
+                            sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", r))
                         }
                     }
                     is MimoChunk.Text -> {
                         var t = chunk.content
-                        if (cfg.thinkMode == "strip") {
-                            // 逐块剔除 <think>...</think>
-                            val sb = StringBuilder()
-                            var i = 0
-                            while (i < t.length) {
-                                if (!inThink && t.startsWith("<think>", i)) { inThink = true; i += 7; continue }
-                                if (!inThink && t.startsWith("<thinking>", i)) { inThink = true; i += 10; continue }
-                                if (inThink && t.startsWith("</think>", i)) { inThink = false; i += 8; continue }
-                                if (inThink && t.startsWith("</thinking>", i)) { inThink = false; i += 11; continue }
-                                if (!inThink) sb.append(t[i])
-                                i++
-                            }
-                            t = if (thinkingBuf.isNotEmpty()) {
-                                val merged = thinkingBuf.toString() + sb.toString()
-                                thinkingBuf.clear(); merged
-                            } else sb.toString()
-                        }
+                        inThink = false
+                        if (cfg.thinkMode == "strip") t = Protocol.stripThink(t)
                         if (t.isNotEmpty()) {
-                            if (wantTools) {
-                                buf.append(t)
-                                // 流式输出：若还没出现工具标记，先输出安全部分
-                                // 保留尾部 20 字符防跨块标记（MiMoML 标记较长）
-                                if (!Protocol.hasToolMarker(buf.toString())) {
-                                    val safe = buf.length - 20
-                                    if (safe > 0) {
-                                        val emit = buf.substring(0, safe)
-                                        buf.delete(0, safe)
-                                        sendDelta(out, responseId, created, model, JSONObject().put("content", emit))
-                                    }
-                                }
-                            } else {
-                                sendDelta(out, responseId, created, model, JSONObject().put("content", t))
-                            }
+                            gotContent = true
+                            sendDelta(out, responseId, created, model, JSONObject().put("content", t))
                         }
                     }
                     is MimoChunk.Usage -> usage = chunk
-                    is MimoChunk.DialogId -> {}
-                    is MimoChunk.Finish -> {}
+                    is MimoChunk.DialogId, is MimoChunk.Finish -> {}
                 }
             }
         } catch (e: Exception) {
-            // SSE 头已发出，不能再写 JSON 响应头；用 error chunk 告知客户端
-            val errDelta = JSONObject().put("content", "[MiMo Gateway 错误] ${e.message ?: e.javaClass.simpleName}")
-            sendDelta(out, responseId, created, model, errDelta)
-            TinyHttpServer.writeSse(out, Protocol.sseLine(Protocol.chunkBase(responseId, created, model, JSONObject(), "stop")))
-            TinyHttpServer.writeSse(out, "data: [DONE]\n\n")
-            return
+            gotContent = true
+            sendDelta(out, responseId, created, model,
+                JSONObject().put("content", "[MiMo Gateway 错误] ${e.message ?: e.javaClass.simpleName}"))
         }
 
-        if (wantTools) {
-            val calls = Protocol.parseToolCalls(buf.toString())
-            if (calls.isNotEmpty()) {
-                finishReason = "tool_calls"
-                // 只发清理掉 MiMoML 块后的残留正文（一般为空），不要把工具标记当内容
-                val leftover = Protocol.cleanToolText(buf.toString())
-                if (leftover.isNotBlank()) sendDelta(out, responseId, created, model, JSONObject().put("content", leftover))
-                val tcArr = JSONArray()
-                for ((idx, c) in calls.withIndex()) {
-                    tcArr.put(JSONObject().apply {
-                        put("index", idx); put("id", c.id); put("type", "function")
-                        put("function", JSONObject().apply { put("name", c.name); put("arguments", "") })
-                    })
-                }
-                sendDelta(out, responseId, created, model, JSONObject().put("tool_calls", tcArr))
-                for ((idx, c) in calls.withIndex()) {
-                    val argsArr = JSONArray().put(JSONObject().apply {
-                        put("index", idx)
-                        put("function", JSONObject().put("arguments", c.arguments))
-                    })
-                    sendDelta(out, responseId, created, model, JSONObject().put("tool_calls", argsArr))
-                }
-            } else if (buf.isNotBlank()) {
-                val leftover = Protocol.stripThink(Protocol.cleanToolText(buf.toString()))
-                if (leftover.isNotBlank()) sendDelta(out, responseId, created, model, JSONObject().put("content", leftover))
-            }
+        if (!gotContent) {
+            val diag = CrashLog.read(cfg.appContext).takeLast(400)
+            val msg = if (diag.isNotBlank()) "[MiMo Gateway] 上游未返回正文。诊断：$diag"
+                      else "[MiMo Gateway] 上游未返回正文，请稍后重试或检查登录凭证。"
+            sendDelta(out, responseId, created, model, JSONObject().put("content", msg))
         }
 
-        val endChunk = Protocol.chunkBase(responseId, created, model, JSONObject(), finishReason)
+        val endChunk = Protocol.chunkBase(responseId, created, model, JSONObject(), "stop")
         if (usage != null) {
             endChunk.put("usage", JSONObject().apply {
                 put("prompt_tokens", usage!!.prompt); put("completion_tokens", usage!!.completion)
                 put("total_tokens", usage!!.total)
-                put("completion_tokens_details", JSONObject().put("reasoning_tokens", usage!!.reasoning))
             })
         }
         TinyHttpServer.writeSse(out, Protocol.sseLine(endChunk))
