@@ -25,6 +25,8 @@ class MimoClient(private val cfg: Config) {
     private val apiUrl = "https://aistudio.xiaomimimo.com/open-apis/bot/chat"
     private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+    private fun netLog(msg: String) { CrashLog.write(cfg.appContext, "NET", RuntimeException(msg)) }
+
     /**
      * 发起流式请求。onChunk 逐块回调；本函数运行在调用线程，异常向上抛。
      */
@@ -72,6 +74,7 @@ class MimoClient(private val cfg: Config) {
         val code = conn.responseCode
         if (code !in 200..299) {
             val err = conn.errorStream?.bufferedReader()?.readText()?.take(500) ?: ""
+            netLog("HTTP $code model=$model body=$err")
             conn.disconnect()
             throw RuntimeException("MiMo HTTP $code: $err")
         }
@@ -79,6 +82,8 @@ class MimoClient(private val cfg: Config) {
         val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
         var event = ""
         var line: String?
+        var lineCount = 0
+        var gotText = false
         try {
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: break
@@ -87,10 +92,14 @@ class MimoClient(private val cfg: Config) {
                     l.startsWith("data:") -> {
                         val dataStr = l.removePrefix("data:").trim()
                         if (dataStr.isEmpty()) continue
+                        if (lineCount < 8) netLog("event=$event data=${dataStr.take(300)}")
+                        lineCount++
                         try {
                             val d = JSONObject(dataStr)
                             when (event) {
-                                "message" -> onChunk(MimoChunk.Text(d.optString("content", "")))
+                                "message" -> {
+                                    gotText = true; onChunk(MimoChunk.Text(d.optString("content", "")))
+                                }
                                 "dialogId" -> onChunk(MimoChunk.DialogId(d.optString("content", "")))
                                 "usage" -> {
                                     val native = d.optJSONObject("nativeUsage")
@@ -103,11 +112,15 @@ class MimoClient(private val cfg: Config) {
                                         reasoning))
                                 }
                                 "finish" -> onChunk(MimoChunk.Finish)
+                                else -> netLog("UNKNOWN event=$event data=${dataStr.take(200)}")
                             }
-                        } catch (e: Exception) { /* 忽略无法解析的 data 行 */ }
+                        } catch (e: Exception) {
+                            netLog("PARSE_FAIL event=$event err=${e.message} raw=${dataStr.take(200)}")
+                        }
                     }
                 }
             }
+            if (!gotText) netLog("NO_TEXT model=$model lines=$lineCount (未收到 message 事件)")
         } finally {
             reader.close()
             conn.disconnect()
