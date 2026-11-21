@@ -9,26 +9,28 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
 
-/** 上游返回的块：文本 / 用量 / 会话ID / 结束 */
+/** 上游返回的块：文本 / 推理 / 用量 / 会话ID / 结束 */
 sealed class MimoChunk {
     data class Text(val content: String) : MimoChunk()
+    data class Reasoning(val content: String) : MimoChunk()
     data class Usage(val prompt: Int, val completion: Int, val total: Int, val reasoning: Int) : MimoChunk()
     data class DialogId(val content: String) : MimoChunk()
     object Finish : MimoChunk()
 }
 
 /**
- * 直接调用 aistudio.xiaomimimo.com 的 bot/chat 接口，解析其 SSE 流。
- * 完全对应原项目 src/mimo/client.ts 的逻辑，零第三方依赖。
+ * 调用 aistudio.xiaomimimo.com 的 v3 (react/chat) 接口，解析其 SSE 流。
+ * 协议参考 Fly143/MiMo2API：https://github.com/Fly143/MiMo2API (2026-11 实测可用)
+ * 关键：旧 /open-apis/bot/chat 已废弃，固定回 event:error；必须用 /open-apis/react/chat。
  */
 class MimoClient(private val cfg: Config) {
-    private val apiUrl = "https://aistudio.xiaomimimo.com/open-apis/bot/chat"
-    private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    private val apiUrl = "https://aistudio.xiaomimimo.com/open-apis/react/chat"
+    private val ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 
     private fun netLog(msg: String) { CrashLog.write(cfg.appContext, "NET", RuntimeException(msg)) }
 
     /**
-     * 发起流式请求。onChunk 逐块回调；本函数运行在调用线程，异常向上抛。
+     * 发起流式请求。onChunk 逐块回调；异常向上抛。
      */
     fun chat(
         conversationId: String,
@@ -38,25 +40,29 @@ class MimoClient(private val cfg: Config) {
         onChunk: (MimoChunk) -> Unit
     ) {
         val msgId = UUID.randomUUID().toString().replace("-", "").take(32)
+        val modelConfig = JSONObject().apply {
+            put("enableThinking", enableThinking)
+            put("webSearchStatus", "disabled")
+            put("model", model)
+            if (enableThinking) put("reasoning_effort", "high")
+        }
         val body = JSONObject().apply {
             put("msgId", msgId)
             put("conversationId", conversationId)
             put("query", query)
-            put("modelConfig", JSONObject().apply {
-                put("model", model)
-                put("enableThinking", enableThinking)
-                put("webSearchStatus", "disabled")
-            })
+            put("modelConfig", modelConfig)
             put("multiMedias", JSONArray())
+            put("attachments", JSONArray())
         }
 
         val url = URL("$apiUrl?xiaomichatbot_ph=${encode(cfg.phToken)}")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 30000
-        conn.readTimeout = 300000
+        conn.readTimeout = 0 // 不超时：思考+输出整条流纯透传
         conn.doInput = true
         conn.doOutput = true
+        conn.setRequestProperty("Accept", "*/*")
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("Cookie",
             "serviceToken=${cfg.serviceToken}; userId=${cfg.userId}; xiaomichatbot_ph=${cfg.phToken}")
@@ -64,7 +70,6 @@ class MimoClient(private val cfg: Config) {
         conn.setRequestProperty("Referer", "https://aistudio.xiaomimimo.com/")
         conn.setRequestProperty("User-Agent", ua)
         conn.setRequestProperty("x-timezone", "Asia/Shanghai")
-        conn.setRequestProperty("Accept", "text/event-stream")
 
         val os: OutputStream = conn.outputStream
         os.write(body.toString().toByteArray(Charsets.UTF_8))
@@ -80,47 +85,55 @@ class MimoClient(private val cfg: Config) {
         }
 
         val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
-        var event = ""
+        var event: String? = null
         var line: String?
         var lineCount = 0
         var gotText = false
         try {
             while (reader.readLine().also { line = it } != null) {
-                val l = line ?: break
+                val l = (line ?: break).trim()
+                if (l.isEmpty()) continue
                 when {
-                    l.startsWith("event:") -> event = l.removePrefix("event:").trim()
-                    l.startsWith("data:") -> {
-                        val dataStr = l.removePrefix("data:").trim()
-                        if (dataStr.isEmpty()) continue
-                        if (lineCount < 8) netLog("event=$event data=${dataStr.take(300)}")
-                        lineCount++
-                        try {
-                            val d = JSONObject(dataStr)
-                            when (event) {
-                                "message" -> {
-                                    gotText = true; onChunk(MimoChunk.Text(d.optString("content", "")))
-                                }
-                                "dialogId" -> onChunk(MimoChunk.DialogId(d.optString("content", "")))
-                                "usage" -> {
-                                    val native = d.optJSONObject("nativeUsage")
-                                    val details = native?.optJSONObject("completion_tokens_details")
-                                    val reasoning = details?.optInt("reasoning_tokens", 0) ?: 0
-                                    onChunk(MimoChunk.Usage(
-                                        d.optInt("promptTokens", 0),
-                                        d.optInt("completionTokens", 0),
-                                        d.optInt("totalTokens", 0),
-                                        reasoning))
-                                }
-                                "finish" -> onChunk(MimoChunk.Finish)
-                                else -> netLog("UNKNOWN event=$event data=${dataStr.take(200)}")
-                            }
-                        } catch (e: Exception) {
-                            netLog("PARSE_FAIL event=$event err=${e.message} raw=${dataStr.take(200)}")
-                        }
-                    }
+                    l.startsWith("event:") -> { event = l.removePrefix("event:").trim(); continue }
+                    l.startsWith("id:") -> continue
+                    !l.startsWith("data:") -> continue
                 }
+                val dataStr = l.removePrefix("data:").trim()
+                if (dataStr.isEmpty()) continue
+                if (dataStr == "[DONE]") break
+                if (lineCount < 8) netLog("event=$event data=${dataStr.take(300)}")
+                lineCount++
+                val d = try { JSONObject(dataStr) } catch (e: Exception) {
+                    netLog("PARSE_FAIL raw=${dataStr.take(200)}"); continue
+                }
+                when (event) {
+                    "error" -> {
+                        netLog("UPSTREAM_ERROR model=$model data=${dataStr.take(300)}")
+                        throw RuntimeException("上游错误: ${d.optString("content", d.optString("msg", dataStr.take(120)))}")
+                    }
+                    "message" -> {
+                        val reasoning = d.optString("reasoningContent", "")
+                        val text = d.optString("content", "")
+                        if (reasoning.isNotEmpty()) onChunk(MimoChunk.Reasoning(reasoning))
+                        if (text.isNotEmpty()) { gotText = true; onChunk(MimoChunk.Text(text)) }
+                    }
+                    "dialogId" -> onChunk(MimoChunk.DialogId(d.optString("content", "")))
+                    "usage" -> {
+                        val native = d.optJSONObject("nativeUsage")
+                        val details = native?.optJSONObject("completion_tokens_details")
+                        val reasoning = details?.optInt("reasoning_tokens", 0) ?: 0
+                        onChunk(MimoChunk.Usage(
+                            d.optInt("promptTokens", 0),
+                            d.optInt("completionTokens", 0),
+                            d.optInt("totalTokens", 0),
+                            reasoning))
+                    }
+                    "finish" -> onChunk(MimoChunk.Finish)
+                    else -> netLog("UNKNOWN event=$event data=${dataStr.take(200)}")
+                }
+                event = null
             }
-            if (!gotText) netLog("NO_TEXT model=$model lines=$lineCount (未收到 message 事件)")
+            if (!gotText) netLog("NO_TEXT model=$model lines=$lineCount")
         } finally {
             reader.close()
             conn.disconnect()
@@ -131,7 +144,6 @@ class MimoClient(private val cfg: Config) {
     private var modelRedirects: Map<String, String>? = null
     private var cachedModels: List<String>? = null
 
-    /** 拉取模型配置，构建「可用模型列表」和「redirectTo 映射」。 */
     private fun ensureModels() {
         if (modelRedirects != null) return
         try {
@@ -151,7 +163,6 @@ class MimoClient(private val cfg: Config) {
                 if (name.isBlank()) continue
                 val redirect = m.optString("redirectTo", "")
                 if (redirect.isNotBlank()) redirects[name] = redirect
-                // 只把 isNew 的当推荐模型列出；其余仍作为可解析别名
                 if (m.optBoolean("isNew")) models.add(name)
             }
             modelRedirects = redirects
@@ -162,28 +173,20 @@ class MimoClient(private val cfg: Config) {
         }
     }
 
-    /** 拉取可用模型列表（对应 fetchBotConfig），失败返回默认列表。 */
     fun fetchModels(): List<String> {
         ensureModels()
         return cachedModels ?: listOf("mimo-v2.6-pro", "mimo-v2.6-flash")
     }
 
-    /**
-     * 把客户端传来的模型名解析成上游真实接受的模型名。
-     * 例如 mimo-v2-pro -> mimo-v2.6-pro（redirectTo）。
-     * 若已是最终模型名则原样返回；完全未知则退回默认。
-     */
     fun resolveModel(requested: String): String {
         ensureModels()
         val map = modelRedirects ?: emptyMap()
         var name = requested.ifBlank { cfg.model }
-        // 跟随 redirectTo 链（最多 3 跳，防环）
         repeat(3) {
             val next = map[name]
             if (next.isNullOrBlank() || next == name) return@repeat
             name = next
         }
-        // 若解析后不在已知模型集合里，也不是任何别名，退回默认
         val allKnown = map.keys + (cachedModels ?: emptyList()) + map.values
         return if (name in allKnown) name else (cachedModels?.firstOrNull() ?: "mimo-v2.6-pro")
     }
