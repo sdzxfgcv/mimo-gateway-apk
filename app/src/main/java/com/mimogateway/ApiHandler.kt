@@ -96,7 +96,11 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         val tools = req.optJSONArray("tools")
         val toolPrompt = if (tools != null && tools.length() > 0) Protocol.buildToolSystemPrompt(tools) else ""
         val query = Protocol.serializeMessages(messages, toolPrompt, continuation)
-        val enableThinking = req.has("reasoning_effort") && req.opt("reasoning_effort") != null
+        // 默认开启思考（用户要看思考）；仅当客户端明确要求 none/off 时关闭
+        val effort = req.optString("reasoning_effort", "").ifBlank {
+            req.optJSONObject("reasoning")?.optString("effort", "") ?: ""
+        }
+        val enableThinking = effort.lowercase() !in setOf("none", "off", "0", "false")
         return Pair(query, enableThinking)
     }
 
@@ -186,7 +190,6 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         var inThink = false
         var usage: MimoChunk.Usage? = null
         var finishReason = "stop"
-        var thinkOpened = false
 
         try {
             mimo.chat(convId, query, model, thinking) { chunk ->
@@ -195,18 +198,13 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
                         if (cfg.thinkMode == "strip") return@chat
                         val r = chunk.content
                         if (r.isNotEmpty()) {
-                            val piece = (if (!thinkOpened) { thinkOpened = true; "<think>" } else "") + r
-                            if (wantTools) buf.append(piece)
-                            else sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", piece))
+                            // separate 模式：思考走 reasoning_content 纯文本字段，Eta 等客户端据此显示思考，不加 <think> 标签
+                            if (wantTools) buf.append(r)
+                            else sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", r))
                         }
                     }
                     is MimoChunk.Text -> {
                         var t = chunk.content
-                        // 闭合之前打开的 think 段（separate 模式用 reasoning_content 字段已单独发，这里补尾巴）
-                        if (thinkOpened && cfg.thinkMode != "strip") {
-                            thinkOpened = false
-                            if (!wantTools) sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", "</think>"))
-                        }
                         if (cfg.thinkMode == "strip") {
                             // 逐块剔除 <think>...</think>
                             val sb = StringBuilder()
