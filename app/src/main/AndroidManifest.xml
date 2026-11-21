@@ -21,6 +21,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LoginActivity"
+            android:exported="false"
+            android:label="登录获取凭证" />
+
         <service
             android:name=".GatewayService"
             android:exported="false"
