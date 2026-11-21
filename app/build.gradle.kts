@@ -11,8 +11,8 @@ android {
         applicationId = "com.mimogateway"
         minSdk = 24
         targetSdk = 34
-        versionCode = 8
-        versionName = "2.1.0"
+        versionCode = 9
+        versionName = "2.2.0"
     }
 
     // 固定签名：优先使用从 CI 注入的发布 keystore；本地开发时回退到 debug keystore
