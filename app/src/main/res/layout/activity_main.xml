@@ -42,10 +42,17 @@
             android:textSize="12sp" />
 
         <Button
+            android:id="@+id/btnLogin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="🔐 App 内登录获取凭证（推荐）"
+            android:layout_marginTop="6dp" />
+
+        <Button
             android:id="@+id/btnImport"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="解析并导入凭据"
+            android:text="或用 cURL 解析导入凭据"
             android:layout_marginTop="6dp" />
 
         <View
