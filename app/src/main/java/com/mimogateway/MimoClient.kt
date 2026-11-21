@@ -114,9 +114,14 @@ class MimoClient(private val cfg: Config) {
         }
     }
 
-    /** 拉取可用模型列表（对应 fetchBotConfig），失败返回默认列表。 */
-    fun fetchModels(): List<String> {
-        return try {
+    // 模型名 → 上游真实模型名（redirectTo）映射，来自 bot/config，带缓存
+    private var modelRedirects: Map<String, String>? = null
+    private var cachedModels: List<String>? = null
+
+    /** 拉取模型配置，构建「可用模型列表」和「redirectTo 映射」。 */
+    private fun ensureModels() {
+        if (modelRedirects != null) return
+        try {
             val conn = URL("https://aistudio.xiaomimimo.com/open-apis/bot/config").openConnection() as HttpURLConnection
             conn.connectTimeout = 15000
             conn.readTimeout = 15000
@@ -124,18 +129,50 @@ class MimoClient(private val cfg: Config) {
             val text = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
             val arr = JSONObject(text).getJSONObject("data").getJSONArray("modelConfigListNg")
-            val out = mutableListOf<String>()
+            val redirects = mutableMapOf<String, String>()
+            val models = mutableListOf<String>()
             for (i in 0 until arr.length()) {
                 val m = arr.getJSONObject(i)
-                if (m.optString("pageType") == "chat" && m.optBoolean("isNew")) {
-                    val name = m.optString("model")
-                    if (name.isNotBlank()) out.add(name)
-                }
+                if (m.optString("pageType") != "chat") continue
+                val name = m.optString("model")
+                if (name.isBlank()) continue
+                val redirect = m.optString("redirectTo", "")
+                if (redirect.isNotBlank()) redirects[name] = redirect
+                // 只把 isNew 的当推荐模型列出；其余仍作为可解析别名
+                if (m.optBoolean("isNew")) models.add(name)
             }
-            if (out.isEmpty()) listOf("mimo-v2-pro", "mimo-v2-flash", "mimo-v2-omni") else out
+            modelRedirects = redirects
+            cachedModels = if (models.isEmpty()) listOf("mimo-v2.6-pro", "mimo-v2.6-flash") else models
         } catch (e: Exception) {
-            listOf("mimo-v2-pro", "mimo-v2-flash", "mimo-v2-omni")
+            modelRedirects = emptyMap()
+            cachedModels = listOf("mimo-v2.6-pro", "mimo-v2.6-flash")
         }
+    }
+
+    /** 拉取可用模型列表（对应 fetchBotConfig），失败返回默认列表。 */
+    fun fetchModels(): List<String> {
+        ensureModels()
+        return cachedModels ?: listOf("mimo-v2.6-pro", "mimo-v2.6-flash")
+    }
+
+    /**
+     * 把客户端传来的模型名解析成上游真实接受的模型名。
+     * 例如 mimo-v2-pro -> mimo-v2.6-pro（redirectTo）。
+     * 若已是最终模型名则原样返回；完全未知则退回默认。
+     */
+    fun resolveModel(requested: String): String {
+        ensureModels()
+        val map = modelRedirects ?: emptyMap()
+        var name = requested.ifBlank { cfg.model }
+        // 跟随 redirectTo 链（最多 3 跳，防环）
+        repeat(3) {
+            val next = map[name]
+            if (next.isNullOrBlank() || next == name) return@repeat
+            name = next
+        }
+        // 若解析后不在已知模型集合里，也不是任何别名，退回默认
+        val allKnown = map.keys + (cachedModels ?: emptyList()) + map.values
+        return if (name in allKnown) name else (cachedModels?.firstOrNull() ?: "mimo-v2.6-pro")
     }
 
     private fun encode(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
