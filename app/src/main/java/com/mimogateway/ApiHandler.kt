@@ -64,29 +64,54 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         }
     }
 
-    private fun buildQuery(req: JSONObject): Pair<String, Boolean> {
-        val messages = req.optJSONArray("messages") ?: JSONArray()
-        var query = Protocol.serializeMessages(messages)
-        val tools = req.optJSONArray("tools")
-        val enableThinking = req.has("reasoning_effort") && req.opt("reasoning_effort") != null
-        if (tools != null && tools.length() > 0) {
-            query = "${Protocol.buildToolSystemPrompt(tools)}\n\n$query"
+    private fun clientSessionKey(req: JSONObject): String {
+        val explicit = req.optString("user", "")
+        if (explicit.isNotBlank()) return explicit
+        // 无 user 字段时，用最早一条 user 消息作为会话锚点（同一对话首条消息不变）
+        val msgs = req.optJSONArray("messages") ?: JSONArray()
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            if (m.optString("role") == "user") {
+                return "u:" + contentStr(m.opt("content")).take(120)
+            }
         }
+        return "fallback"
+    }
+
+    private fun contentStr(c: Any?): String = when (c) {
+        is String -> c
+        is JSONArray -> {
+            val sb = StringBuilder()
+            for (i in 0 until c.length()) {
+                val o = c.optJSONObject(i) ?: continue
+                if (o.optString("type") == "text") sb.append(o.optString("text"))
+            }
+            sb.toString()
+        }
+        else -> ""
+    }
+
+    private fun buildQuery(req: JSONObject, continuation: Boolean): Pair<String, Boolean> {
+        val messages = req.optJSONArray("messages") ?: JSONArray()
+        val tools = req.optJSONArray("tools")
+        val toolPrompt = if (tools != null && tools.length() > 0) Protocol.buildToolSystemPrompt(tools) else ""
+        val query = Protocol.serializeMessages(messages, toolPrompt, continuation)
+        val enableThinking = req.has("reasoning_effort") && req.opt("reasoning_effort") != null
         return Pair(query, enableThinking)
     }
 
-    private fun getConversationId(req: JSONObject): String {
-        val clientSid = req.optString("user", "").ifBlank {
-            // 用最后一条 user 消息的前 80 字符作为会话键的补充
-            val msgs = req.optJSONArray("messages") ?: JSONArray()
-            msgs.toString().take(80)
-        }
-        return sessions.getOrPut(clientSid) { UUID.randomUUID().toString().replace("-", "") }
+    private fun getConversationId(req: JSONObject): Pair<String, Boolean> {
+        val key = clientSessionKey(req)
+        val existing = sessions[key]
+        if (existing != null) return Pair(existing, false) // 续接
+        val conv = UUID.randomUUID().toString().replace("-", "")
+        sessions[key] = conv
+        return Pair(conv, true) // 新会话
     }
 
     private fun handleNonStream(req: JSONObject, out: OutputStream) {
-        val (query, thinking) = buildQuery(req)
-        val convId = getConversationId(req)
+        val (convId, isNew) = getConversationId(req)
+        val (query, thinking) = buildQuery(req, continuation = !isNew)
         val model = mimo.resolveModel(req.optString("model", cfg.model))
         val fullText = StringBuilder()
         var usage: MimoChunk.Usage? = null
@@ -147,8 +172,8 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     }
 
     private fun handleStream(req: JSONObject, out: OutputStream) {
-        val (query, thinking) = buildQuery(req)
-        val convId = getConversationId(req)
+        val (convId, isNew) = getConversationId(req)
+        val (query, thinking) = buildQuery(req, continuation = !isNew)
         val model = mimo.resolveModel(req.optString("model", cfg.model))
         val tools = req.optJSONArray("tools")
         val wantTools = tools != null && tools.length() > 0
