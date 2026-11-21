@@ -59,19 +59,28 @@ class LoginActivity : Activity() {
         findViewById<Button>(R.id.btnCancel).setOnClickListener { finish() }
     }
 
+    companion object {
+        // 小米登录可能用不同的 Cookie 名，全部兼容（检测与提取用同一套规则，避免误判）
+        private val ST_NAMES = listOf("serviceToken", "xiaomichatbot_serviceToken", "service_token")
+        private val UID_NAMES = listOf("userId", "xiaomichatbot_userId", "user_id")
+        private val PH_NAMES = listOf("xiaomichatbot_ph", "xiaomichatbotPh")
+    }
+
     /** 实时提示已检测到哪些 Cookie。 */
     private fun updateTipFromCookies() {
         val cookies = CookieManager.getInstance().getCookie(homeUrl) ?: ""
-        val hasSt = cookies.contains("serviceToken=")
-        val hasUid = cookies.contains("userId=")
-        val hasPh = cookies.contains("xiaomichatbot_ph=")
+        val st = findCookie(cookies, ST_NAMES)
+        val uid = findCookie(cookies, UID_NAMES)
+        val ph = findCookie(cookies, PH_NAMES)
         tvTip.text = when {
-            hasSt && hasUid && hasPh ->
+            !st.isNullOrBlank() && !uid.isNullOrBlank() && !ph.isNullOrBlank() ->
                 "✓ 已检测到全部凭证！点上方「登录完成后点这里」即可导入。"
-            hasSt && hasUid ->
+            !st.isNullOrBlank() && !uid.isNullOrBlank() ->
                 "已登录，还缺 xiaomichatbot_ph。请在网页里发一条消息后再提取。"
-            hasSt ->
+            !st.isNullOrBlank() ->
                 "已检测到 serviceToken，继续完成登录…"
+            cookies.isNotBlank() ->
+                "已打开网页，正在等待登录…（Cookie: ${cookieNames(cookies)}）"
             else ->
                 "请在下方网页中用小米账号登录，登录后随便发一条消息，再点上方按钮。"
         }
@@ -79,17 +88,27 @@ class LoginActivity : Activity() {
 
     /** 从 CookieManager 提取凭证并保存。 */
     private fun extractCredentials() {
-        val raw = CookieManager.getInstance().getCookie(homeUrl) ?: ""
-        val st = cookieValue(raw, "serviceToken")
-        val uid = cookieValue(raw, "userId")
-        val ph = cookieValue(raw, "xiaomichatbot_ph")
+        // 同时读取多个域，serviceToken 常落在父域 .xiaomimimo.com
+        val raw = listOf(
+            CookieManager.getInstance().getCookie(homeUrl) ?: "",
+            CookieManager.getInstance().getCookie("https://xiaomimimo.com") ?: "",
+            CookieManager.getInstance().getCookie("https://www.xiaomimimo.com") ?: ""
+        ).joinToString("; ")
+
+        val st = findCookie(raw, ST_NAMES)
+        val uid = findCookie(raw, UID_NAMES)
+        val ph = findCookie(raw, PH_NAMES)
 
         if (st.isNullOrBlank()) {
-            Toast.makeText(this, "没找到 serviceToken，请先完成登录", Toast.LENGTH_LONG).show()
+            val names = cookieNames(raw)
+            tvTip.text = "没找到 serviceToken。当前检测到的 Cookie 名：$names\n（请完成登录后重试，或把此提示截图给我）"
+            Toast.makeText(this, "没找到 serviceToken，请把提示截图", Toast.LENGTH_LONG).show()
             return
         }
         if (ph.isNullOrBlank()) {
-            Toast.makeText(this, "还缺 xiaomichatbot_ph，请先在网页里发一条消息", Toast.LENGTH_LONG).show()
+            val names = cookieNames(raw)
+            tvTip.text = "还缺 xiaomichatbot_ph，请在网页里发一条消息。当前 Cookie：$names"
+            Toast.makeText(this, "还缺 xiaomichatbot_ph，请先发一条消息", Toast.LENGTH_LONG).show()
             return
         }
 
@@ -105,15 +124,24 @@ class LoginActivity : Activity() {
         finish()
     }
 
-    private fun cookieValue(cookieHeader: String, name: String): String? {
-        for (part in cookieHeader.split(";")) {
-            val kv = part.trim()
-            if (kv.startsWith("$name=")) {
-                return kv.substring(name.length + 1).trim().trim('"')
+    /** 按候选名精确提取 Cookie 值（忽略大小写），避免 xiaomichatbot_serviceToken 被误判成 serviceToken。 */
+    private fun findCookie(cookieHeader: String, names: List<String>): String? {
+        val parts = cookieHeader.split(";").map { it.trim() }
+        for (name in names) {
+            for (part in parts) {
+                if (part.startsWith("$name=", ignoreCase = true)) {
+                    val v = part.substring(name.length + 1).trim().trim('"')
+                    if (v.isNotBlank()) return v
+                }
             }
         }
         return null
     }
+
+    /** 仅返回 Cookie 名称（不含敏感值），用于调试提示。 */
+    private fun cookieNames(cookieHeader: String): String =
+        cookieHeader.split(";").map { it.trim().substringBefore("=") }
+            .filter { it.isNotBlank() }.distinct().joinToString(", ")
 
     override fun onBackPressed() {
         // 网页内返回优先，退到首页再退出
