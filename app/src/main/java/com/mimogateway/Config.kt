@@ -30,7 +30,7 @@ class Config(ctx: Context) {
         set(v) = sp.edit().putInt("port", v).apply()
 
     var model: String
-        get() = sp.getString("model", "mimo-v2-pro") ?: "mimo-v2-pro"
+        get() = sp.getString("model", "mimo-v2.6-pro") ?: "mimo-v2.6-pro"
         set(v) = sp.edit().putString("model", v).apply()
 
     var thinkMode: String
