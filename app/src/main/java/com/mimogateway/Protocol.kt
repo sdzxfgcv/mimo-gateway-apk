@@ -149,11 +149,11 @@ CRITICAL: <antml:invoke> CANNOT execute the tools above — that channel is rese
     /** 解析 <tool_calls> 内的 <invoke name="X"><parameter name="Y">值</parameter></invoke>。 */
     private fun parseInvokes(text: String): List<ToolCall> {
         val out = mutableListOf<ToolCall>()
-        val invokeRe = Regex("<invoke\\s*name=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)</invoke>", RegexOption.IGNORECASE)
+        val invokeRe = Regex("(?i)<invoke\\s*name=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)</invoke>")
         val matches = invokeRe.findAll(text).toList()
         if (matches.isEmpty()) {
             // 裸 <invoke name="X"> 无闭合标签：取到下一个 invoke 或结尾
-            val openRe = Regex("<invoke\\s*name=[\"']([^\"']+)[\"'][^>]*>", RegexOption.IGNORECASE)
+            val openRe = Regex("(?i)<invoke\\s*name=[\"']([^\"']+)[\"'][^>]*>")
             val opens = openRe.findAll(text).toList()
             for (i in opens.indices) {
                 val name = opens[i].groupValues[1].trim()
@@ -176,7 +176,7 @@ CRITICAL: <antml:invoke> CANNOT execute the tools above — that channel is rese
     /** 解析 <parameter name="Y">值</parameter> 为 JSON 参数对象。 */
     private fun parseParameters(inner: String): String {
         val obj = JSONObject()
-        val re = Regex("<parameter\\s+name=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)</parameter>", RegexOption.IGNORECASE)
+        val re = Regex("(?i)<parameter\\s+name=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)</parameter>")
         for (m in re.findAll(inner)) {
             val key = m.groupValues[1].trim()
             var value = m.groupValues[2].trim()
