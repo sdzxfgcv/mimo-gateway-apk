@@ -26,6 +26,19 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+
       - name: Build Release APK
         run: gradle assembleRelease --no-daemon
 
@@ -35,7 +48,7 @@ jobs:
           echo "APK: $APK"
           ls -la "$APK"
           unzip -l "$APK" | grep -E 'META-INF/(CERT|.*)\.(RSA|SF)' || true
-          jarsigner -verify -verbose -certs "$APK" | head -20
+          jarsigner -verify -verbose -certs "$APK" | grep -E 'CN=|Signer|jar verified' | head -10
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
