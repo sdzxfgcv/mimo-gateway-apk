@@ -11,13 +11,25 @@ android {
         applicationId = "com.mimogateway"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
-    // 用内置 debug keystore 签名，保证 release 包可直接安装
+    // 固定签名：优先使用从 CI 注入的发布 keystore；本地开发时回退到 debug keystore
     signingConfigs {
-        getByName("debug") {
+        create("release") {
+            val ksPath = System.getenv("KEYSTORE_FILE")
+            if (!ksPath.isNullOrBlank()) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS") ?: "mimo"
+                keyPassword = System.getenv("KEY_PASSWORD")
+            } else {
+                storeFile = signingConfigs.getByName("debug").storeFile
+                storePassword = signingConfigs.getByName("debug").storePassword
+                keyAlias = signingConfigs.getByName("debug").keyAlias
+                keyPassword = signingConfigs.getByName("debug").keyPassword
+            }
             isV1SigningEnabled = true
             isV2SigningEnabled = true
         }
@@ -28,7 +40,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
