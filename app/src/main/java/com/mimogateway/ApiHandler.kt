@@ -87,7 +87,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     private fun handleNonStream(req: JSONObject, out: OutputStream) {
         val (query, thinking) = buildQuery(req)
         val convId = getConversationId(req)
-        val model = req.optString("model", cfg.model)
+        val model = mimo.resolveModel(req.optString("model", cfg.model))
         val fullText = StringBuilder()
         var usage: MimoChunk.Usage? = null
         mimo.chat(convId, query, model, thinking) { chunk ->
@@ -141,7 +141,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     private fun handleStream(req: JSONObject, out: OutputStream) {
         val (query, thinking) = buildQuery(req)
         val convId = getConversationId(req)
-        val model = req.optString("model", cfg.model)
+        val model = mimo.resolveModel(req.optString("model", cfg.model))
         val tools = req.optJSONArray("tools")
         val wantTools = tools != null && tools.length() > 0
 
@@ -154,48 +154,57 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         var usage: MimoChunk.Usage? = null
         var finishReason = "stop"
 
-        mimo.chat(convId, query, model, thinking) { chunk ->
-            when (chunk) {
-                is MimoChunk.Text -> {
-                    var t = chunk.content
-                    if (cfg.thinkMode == "strip") {
-                        // 逐块剔除 <think>...</think>
-                        val sb = StringBuilder()
-                        var i = 0
-                        while (i < t.length) {
-                            if (!inThink && t.startsWith("<think>", i)) { inThink = true; i += 7; continue }
-                            if (!inThink && t.startsWith("<thinking>", i)) { inThink = true; i += 10; continue }
-                            if (inThink && t.startsWith("</think>", i)) { inThink = false; i += 8; continue }
-                            if (inThink && t.startsWith("</thinking>", i)) { inThink = false; i += 11; continue }
-                            if (!inThink) sb.append(t[i])
-                            i++
-                        }
-                        t = if (thinkingBuf.isNotEmpty()) {
-                            val merged = thinkingBuf.toString() + sb.toString()
-                            thinkingBuf.clear(); merged
-                        } else sb.toString()
-                    }
-                    if (t.isNotEmpty()) {
-                        if (wantTools) {
-                            buf.append(t)
-                            // 流式输出：若还没出现工具标记，先输出安全部分（保留尾部 12 字符防跨块标记）
-                            if (!buf.contains("<tool_call")) {
-                                val safe = buf.length - 12
-                                if (safe > 0) {
-                                    val emit = buf.substring(0, safe)
-                                    buf.delete(0, safe)
-                                    sendDelta(out, responseId, created, model, JSONObject().put("content", emit))
-                                }
+        try {
+            mimo.chat(convId, query, model, thinking) { chunk ->
+                when (chunk) {
+                    is MimoChunk.Text -> {
+                        var t = chunk.content
+                        if (cfg.thinkMode == "strip") {
+                            // 逐块剔除 <think>...</think>
+                            val sb = StringBuilder()
+                            var i = 0
+                            while (i < t.length) {
+                                if (!inThink && t.startsWith("<think>", i)) { inThink = true; i += 7; continue }
+                                if (!inThink && t.startsWith("<thinking>", i)) { inThink = true; i += 10; continue }
+                                if (inThink && t.startsWith("</think>", i)) { inThink = false; i += 8; continue }
+                                if (inThink && t.startsWith("</thinking>", i)) { inThink = false; i += 11; continue }
+                                if (!inThink) sb.append(t[i])
+                                i++
                             }
-                        } else {
-                            sendDelta(out, responseId, created, model, JSONObject().put("content", t))
+                            t = if (thinkingBuf.isNotEmpty()) {
+                                val merged = thinkingBuf.toString() + sb.toString()
+                                thinkingBuf.clear(); merged
+                            } else sb.toString()
+                        }
+                        if (t.isNotEmpty()) {
+                            if (wantTools) {
+                                buf.append(t)
+                                // 流式输出：若还没出现工具标记，先输出安全部分（保留尾部 12 字符防跨块标记）
+                                if (!buf.contains("<tool_call")) {
+                                    val safe = buf.length - 12
+                                    if (safe > 0) {
+                                        val emit = buf.substring(0, safe)
+                                        buf.delete(0, safe)
+                                        sendDelta(out, responseId, created, model, JSONObject().put("content", emit))
+                                    }
+                                }
+                            } else {
+                                sendDelta(out, responseId, created, model, JSONObject().put("content", t))
+                            }
                         }
                     }
+                    is MimoChunk.Usage -> usage = chunk
+                    is MimoChunk.DialogId -> {}
+                    is MimoChunk.Finish -> {}
                 }
-                is MimoChunk.Usage -> usage = chunk
-                is MimoChunk.DialogId -> {}
-                is MimoChunk.Finish -> {}
             }
+        } catch (e: Exception) {
+            // SSE 头已发出，不能再写 JSON 响应头；用 error chunk 告知客户端
+            val errDelta = JSONObject().put("content", "[MiMo Gateway 错误] ${e.message ?: e.javaClass.simpleName}")
+            sendDelta(out, responseId, created, model, errDelta)
+            TinyHttpServer.writeSse(out, Protocol.sseLine(Protocol.chunkBase(responseId, created, model, JSONObject(), "stop")))
+            TinyHttpServer.writeSse(out, "data: [DONE]\n\n")
+            return
         }
 
         if (wantTools) {
