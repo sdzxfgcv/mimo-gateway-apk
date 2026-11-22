@@ -1,1 +1,1 @@
--keep class com.mimogateway.eta.** { *; }
+-keep class com.mimogateway.** { *; }
