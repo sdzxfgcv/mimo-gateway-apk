@@ -12,13 +12,13 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MiMo Gateway"
+            android:text="MiMo Gateway · Eta 工具版"
             android:textSize="24sp"
             android:textStyle="bold" />
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="把小米 MiMo 网页端变成 OpenAI 兼容 API（本地运行）"
+            android:text="MiMo App 通道（OpenAI 兼容）· 原生支持 tools / tool_calls / 思考"
             android:textSize="13sp"
             android:textColor="#666666"
             android:layout_marginTop="4dp" />
@@ -26,15 +26,29 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="第一步：登录 aistudio.xiaomimimo.com，F12 打开开发者工具 → Network，随便发一条消息，找到 chat 请求，右键 Copy as cURL，整段粘贴到下面："
+            android:text="第一步：点下面按钮，在 App 内用小米账号登录一次，抓取 passToken。"
             android:textSize="13sp"
             android:layout_marginTop="18dp" />
+
+        <Button
+            android:id="@+id/btnLogin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="🔐 App 内登录获取 passToken（推荐）"
+            android:layout_marginTop="6dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="或手动粘贴 Cookie / cURL（需含 passToken）："
+            android:textSize="13sp"
+            android:layout_marginTop="14dp" />
 
         <EditText
             android:id="@+id/etCurl"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="粘贴 Copy as cURL 的完整内容"
+            android:hint="粘贴含 passToken 的 Cookie 或 cURL"
             android:inputType="textMultiLine"
             android:minLines="3"
             android:maxLines="6"
@@ -42,17 +56,10 @@
             android:textSize="12sp" />
 
         <Button
-            android:id="@+id/btnLogin"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="🔐 App 内登录获取凭证（推荐）"
-            android:layout_marginTop="6dp" />
-
-        <Button
             android:id="@+id/btnImport"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="或用 cURL 解析导入凭据"
+            android:text="解析并导入凭据"
             android:layout_marginTop="6dp" />
 
         <View
@@ -64,14 +71,14 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="或手动填写（三选一方式）："
+            android:text="当前凭证（可手动修改）："
             android:textSize="13sp" />
 
         <EditText
             android:id="@+id/etServiceToken"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="serviceToken"
+            android:hint="passToken（核心凭证）"
             android:textSize="13sp" />
         <EditText
             android:id="@+id/etUserId"
@@ -83,7 +90,7 @@
             android:id="@+id/etPhToken"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="xiaomichatbot_ph"
+            android:hint="cUserId（可留空）"
             android:textSize="13sp" />
         <EditText
             android:id="@+id/etApiKey"

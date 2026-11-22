@@ -48,9 +48,9 @@ class MainActivity : Activity() {
         val tvStatus = findViewById<TextView>(R.id.tvStatus)
         val tvHint = findViewById<TextView>(R.id.tvHint)
 
-        etSt.setText(cfg.serviceToken)
+        etSt.setText(cfg.passToken)
         etUid.setText(cfg.userId)
-        etPh.setText(cfg.phToken)
+        etPh.setText(cfg.cUserId)
         etKey.setText(cfg.apiKey)
         etPort.setText(if (cfg.port != 8080) cfg.port.toString() else "")
 
@@ -62,16 +62,18 @@ class MainActivity : Activity() {
             val ok = cfg.importFromCurl(etCurl.text.toString().trim())
             Toast.makeText(this, if (ok) "导入成功" else "解析失败，请检查 cURL 内容", Toast.LENGTH_SHORT).show()
             if (ok) {
-                etSt.setText(cfg.serviceToken)
+                etSt.setText(cfg.passToken)
                 etUid.setText(cfg.userId)
-                etPh.setText(cfg.phToken)
+                etPh.setText(cfg.cUserId)
             }
         }
 
         findViewById<Button>(R.id.btnSave).setOnClickListener {
-            cfg.serviceToken = etSt.text.toString().trim()
+            cfg.passToken = etSt.text.toString().trim()
             cfg.userId = etUid.text.toString().trim()
-            cfg.phToken = etPh.text.toString().trim()
+            cfg.cUserId = etPh.text.toString().trim()
+            cfg.appCookies = ""   // 凭据变更，作废旧会话
+            cfg.appCookiesAt = 0L
             cfg.apiKey = etKey.text.toString().trim()
             val p = etPort.text.toString().trim().toIntOrNull()
             if (p != null && p in 1..65535) cfg.port = p
@@ -87,7 +89,7 @@ class MainActivity : Activity() {
                 tvHint.text = ""
             } else {
                 if (!cfg.isConfigured()) {
-                    Toast.makeText(this, "请先导入或填写凭据", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "请先登录获取 passToken", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
                 requestNotifPermission()
@@ -157,9 +159,9 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 2001 && resultCode == RESULT_OK) {
             // 登录后刷新输入框
-            findViewById<EditText>(R.id.etServiceToken).setText(cfg.serviceToken)
+            findViewById<EditText>(R.id.etServiceToken).setText(cfg.passToken)
             findViewById<EditText>(R.id.etUserId).setText(cfg.userId)
-            findViewById<EditText>(R.id.etPhToken).setText(cfg.phToken)
+            findViewById<EditText>(R.id.etPhToken).setText(cfg.cUserId)
             Toast.makeText(this, "凭证已就绪，点「启动服务」即可", Toast.LENGTH_SHORT).show()
             refreshStatus()
         }

@@ -12,11 +12,12 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import java.util.UUID
 
 /**
- * 内嵌浏览器登录：加载 MiMo Studio 官网，用户自己登录，
- * 自动抓取 serviceToken / userId / xiaomichatbot_ph 三个 Cookie 并保存。
- * 实现参考 Fly143/MiMo2API 的 LoginActivity（2026-11 实测可用）。
+ * 内嵌浏览器登录：加载 MiMo 官网并跳转小米账号登录，抓 passToken / userId / cUserId。
+ * passToken 用来走 MiMo App 的 OpenAI 兼容通道（/api/route/chat/completions），
+ * 该通道原生支持 tools / tool_calls，是 Eta 工具调用能工作的前提。
  */
 class LoginActivity : Activity() {
     private lateinit var webView: WebView
@@ -34,10 +35,10 @@ class LoginActivity : Activity() {
         "https://account.xiaomi.com/",
         "https://mi.com/"
     )
-    // 实测小米下发的是 xiaomichatbot_serviceToken（带前缀），优先取它
-    private val stNames = listOf("xiaomichatbot_serviceToken", "serviceToken", "service_token")
+    // App 通道核心：passToken（小米账号长期凭证）
+    private val passNames = listOf("passToken", "pass_token")
     private val uidNames = listOf("userId", "xiaomichatbot_userId", "user_id")
-    private val phNames = listOf("xiaomichatbot_ph", "xiaomichatbotPh")
+    private val cuidNames = listOf("cUserId", "cuser_id")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,7 +63,6 @@ class LoginActivity : Activity() {
             setSupportZoom(true)
             builtInZoomControls = true
             displayZoomControls = false
-            // 移动端 UA，走小米手机登录流程
             userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
         }
@@ -109,45 +109,43 @@ class LoginActivity : Activity() {
 
     private fun checkCookies() {
         val raw = allCookies()
-        val st = pick(raw, stNames)
+        val pass = pick(raw, passNames)
         val uid = pick(raw, uidNames)
-        val ph = pick(raw, phNames)
+        val cuid = pick(raw, cuidNames)
 
-        // Cookie 变化时更新诊断提示
         if (raw.length != lastLen) {
             lastLen = raw.length
-            CrashLog.write(this, "LOGIN_COOKIES", RuntimeException("names=${cookieNames(raw)} st=${st.take(6)} uid=$uid ph=${ph.take(6)}"))
+            CrashLog.write(this, "LOGIN_COOKIES", RuntimeException("names=${cookieNames(raw)} pass=${pass.take(6)} uid=$uid cuid=$cuid"))
         }
 
-        val full = st.isNotBlank() && uid.isNotBlank() && ph.isNotBlank()
+        val full = pass.isNotBlank() && uid.isNotBlank()
         if (full) {
-            tvTip.text = "✓ 已捕获全部凭证（userId $uid），正在自动导入…"
+            tvTip.text = "✓ 已捕获 App 通道凭证（userId $uid），正在自动导入…"
             if (!imported) extractCredentials(manual = false)
         } else {
-            tvTip.text = "请在下方用小米账号登录，登录后发一条消息。" +
-                "（已捕获：${if (st.isBlank()) "" else "serviceToken "}${if (uid.isBlank()) "" else "userId "}${if (ph.isBlank()) "" else "xiaomichatbot_ph "}）"
+            tvTip.text = "请用小米账号登录（不要只扫码看页面）。" +
+                "App 通道需要 passToken。（已捕获：${if (pass.isBlank()) "" else "passToken "}${if (uid.isBlank()) "" else "userId "}）"
         }
     }
 
     private fun extractCredentials(manual: Boolean) {
         val raw = allCookies()
-        val st = pick(raw, stNames)
+        val pass = pick(raw, passNames)
         val uid = pick(raw, uidNames)
-        val ph = pick(raw, phNames)
+        val cuid = pick(raw, cuidNames)
 
-        if (st.isBlank()) {
-            if (manual) Toast.makeText(this, "还没找到 serviceToken，请先完成登录", Toast.LENGTH_LONG).show()
-            return
-        }
-        if (ph.isBlank()) {
-            if (manual) Toast.makeText(this, "还缺 xiaomichatbot_ph，请先在网页发一条消息", Toast.LENGTH_LONG).show()
+        if (pass.isBlank()) {
+            if (manual) Toast.makeText(this, "还没找到 passToken：请在页面里点登录，用小米账号完成一次登录", Toast.LENGTH_LONG).show()
             return
         }
 
         val cfg = Config(this)
-        cfg.serviceToken = st
-        cfg.userId = uid
-        cfg.phToken = ph
+        cfg.passToken = pass
+        if (uid.isNotBlank()) cfg.userId = uid
+        if (cuid.isNotBlank()) cfg.cUserId = cuid
+        if (cfg.deviceId.isBlank()) cfg.deviceId = "pc_" + UUID.randomUUID().toString().replace("-", "")
+        cfg.appCookies = ""   // 作废旧会话，下次请求重新换取
+        cfg.appCookiesAt = 0L
         CookieManager.getInstance().flush()
         imported = true
         polling = false
@@ -156,7 +154,7 @@ class LoginActivity : Activity() {
         finish()
     }
 
-    /** 精确匹配 Cookie 名（避免 xiaomichatbot_serviceToken 被误判成 serviceToken）。 */
+    /** 精确匹配 Cookie 名，避免前缀误判。 */
     private fun pick(cookies: String, names: List<String>): String {
         for (name in names) {
             val parts = cookies.split(";")
