@@ -11,8 +11,8 @@ android {
         applicationId = "com.mimogateway.eta"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0-eta"
+        versionCode = 2
+        versionName = "2.0-eta-tools"
     }
 
     // 固定签名：优先使用从 CI 注入的发布 keystore；本地开发时回退到 debug keystore
