@@ -92,7 +92,8 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     private fun handleNonStream(req: JSONObject, out: OutputStream) {
         val cid = convId(req)
         val (query, thinking) = buildQuery(req)
-        val model = mimo.resolveModel(req.optString("model", cfg.model))
+        val requestedModel = req.optString("model", cfg.model)
+        val model = mimo.resolveModel(requestedModel)
         val text = StringBuilder()
         val reason = StringBuilder()
         var usage: MimoChunk.Usage? = null
@@ -121,7 +122,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
         }
         val resp = JSONObject().apply {
             put("id", responseId); put("object", "chat.completion")
-            put("created", created); put("model", model)
+            put("created", created); put("model", requestedModel)
             put("choices", JSONArray().put(JSONObject().apply {
                 put("index", 0); put("message", message); put("finish_reason", "stop")
             }))
@@ -136,14 +137,15 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
     private fun handleStream(req: JSONObject, out: OutputStream) {
         val cid = convId(req)
         val (query, thinking) = buildQuery(req)
-        val model = mimo.resolveModel(req.optString("model", cfg.model))
+        val requestedModel = req.optString("model", cfg.model)
+        val model = mimo.resolveModel(requestedModel)
+        val echoModel = requestedModel.ifBlank { model }
 
         TinyHttpServer.writeSseHeaders(out)
         val responseId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
         val created = System.currentTimeMillis() / 1000
         var usage: MimoChunk.Usage? = null
         var inThink = false
-        var thinkBuf = StringBuilder()
         var gotContent = false
 
         try {
@@ -155,7 +157,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
                         // 纯文本思考，Eta 读 reasoning_content 字段直接渲染成思考块，不带 <think> 标签
                         if (r.isNotEmpty()) {
                             inThink = true
-                            sendDelta(out, responseId, created, model, JSONObject().put("reasoning_content", r))
+                            sendDelta(out, responseId, created, echoModel, JSONObject().put("reasoning_content", r))
                         }
                     }
                     is MimoChunk.Text -> {
@@ -164,7 +166,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
                         if (cfg.thinkMode == "strip") t = Protocol.stripThink(t)
                         if (t.isNotEmpty()) {
                             gotContent = true
-                            sendDelta(out, responseId, created, model, JSONObject().put("content", t))
+                            sendDelta(out, responseId, created, echoModel, JSONObject().put("content", t))
                         }
                     }
                     is MimoChunk.Usage -> usage = chunk
@@ -173,7 +175,7 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
             }
         } catch (e: Exception) {
             gotContent = true
-            sendDelta(out, responseId, created, model,
+            sendDelta(out, responseId, created, echoModel,
                 JSONObject().put("content", "[MiMo Gateway 错误] ${e.message ?: e.javaClass.simpleName}"))
         }
 
@@ -181,10 +183,10 @@ class ApiHandler(private val cfg: Config) : TinyHttpServer.RequestHandler {
             val diag = CrashLog.read(cfg.appContext).takeLast(400)
             val msg = if (diag.isNotBlank()) "[MiMo Gateway] 上游未返回正文。诊断：$diag"
                       else "[MiMo Gateway] 上游未返回正文，请稍后重试或检查登录凭证。"
-            sendDelta(out, responseId, created, model, JSONObject().put("content", msg))
+            sendDelta(out, responseId, created, echoModel, JSONObject().put("content", msg))
         }
 
-        val endChunk = Protocol.chunkBase(responseId, created, model, JSONObject(), "stop")
+        val endChunk = Protocol.chunkBase(responseId, created, echoModel, JSONObject(), "stop")
         if (usage != null) {
             endChunk.put("usage", JSONObject().apply {
                 put("prompt_tokens", usage!!.prompt); put("completion_tokens", usage!!.completion)
