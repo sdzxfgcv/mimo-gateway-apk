@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.mimogateway.eta"
+    namespace = "com.mimogateway"
     compileSdk = 34
 
     defaultConfig {
