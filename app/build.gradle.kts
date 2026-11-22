@@ -4,15 +4,15 @@ plugins {
 }
 
 android {
-    namespace = "com.mimogateway"
+    namespace = "com.mimogateway.eta"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.mimogateway"
+        applicationId = "com.mimogateway.eta"
         minSdk = 24
         targetSdk = 34
-        versionCode = 11
-        versionName = "3.0.0"
+        versionCode = 1
+        versionName = "1.0-eta"
     }
 
     // 固定签名：优先使用从 CI 注入的发布 keystore；本地开发时回退到 debug keystore
